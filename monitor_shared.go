@@ -47,6 +47,7 @@ type defaultInterfaceMonitor struct {
 	checkUpdateRunning    sync.Mutex
 	checkUpdateClosed     bool
 	retryAttempt          int
+	noRouteChecks         int
 	retryDelays           []time.Duration
 	networkUpdateDelay    time.Duration
 	checkUpdateFunc       func() error
@@ -110,6 +111,7 @@ func (m *defaultInterfaceMonitor) postCheckUpdate() {
 		err = m.checkUpdate()
 	}
 	if errors.Is(err, ErrNoRoute) {
+		m.noRouteChecks++
 		if !m.noRoute {
 			m.noRoute = true
 			m.defaultInterface.Store(nil)
@@ -119,10 +121,20 @@ func (m *defaultInterfaceMonitor) postCheckUpdate() {
 	} else if err != nil {
 		m.logger.Error("check interface: ", err)
 	} else {
+		wasNoRoute := m.noRoute
+		noRouteChecks := m.noRouteChecks
 		m.noRoute = false
+		m.noRouteChecks = 0
 		m.checkUpdateAccess.Lock()
 		m.retryAttempt = 0
 		m.checkUpdateAccess.Unlock()
+		if wasNoRoute && m.logger != nil {
+			if defaultInterface := m.defaultInterface.Load(); defaultInterface != nil {
+				m.logger.Info("[TUN] default route recovered after ", noRouteChecks, " checks, interface => ", defaultInterface.Name)
+			} else {
+				m.logger.Info("[TUN] default route recovered after ", noRouteChecks, " checks")
+			}
+		}
 	}
 }
 
@@ -136,7 +148,11 @@ func (m *defaultInterfaceMonitor) scheduleRetry() {
 	if retryIndex >= len(m.retryDelays) {
 		retryIndex = len(m.retryDelays) - 1
 	}
-	m.scheduleCheckLocked(m.retryDelays[retryIndex])
+	retryDelay := m.retryDelays[retryIndex]
+	if m.logger != nil {
+		m.logger.Debug("[TUN] no default route, retry detection in ", retryDelay)
+	}
+	m.scheduleCheckLocked(retryDelay)
 	if m.retryAttempt < len(m.retryDelays)-1 {
 		m.retryAttempt++
 	}
